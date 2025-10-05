@@ -44,3 +44,7 @@ pip install pyinstaller # or pip install auto-py-to-exe for use gui
 
 pyinstaller --noconfirm --onedir --windowed --icon "./resources/icon32.ico" --hidden-import "zeroconf._utils.ipaddress" --hidden-import "zeroconf._handlers.answers"  "./main.py"
 ```
+
+## 📄 License
+
+This repository's source code is available under the [MIT License](LICENSE).
