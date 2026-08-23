@@ -51,7 +51,7 @@ class RemoteControl:
 
     async def pair(self, host: str, callback: Callable):
         self.remote = AndroidTVRemote(
-            'Android TV Remote demo',
+            'Android TV Remote Control',
             'keys/cert.pem',
             'keys/key.pem',
             host,
