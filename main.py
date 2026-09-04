@@ -1,10 +1,12 @@
 import asyncio
-import functools
 import logging
 import sys
+from functools import partial
 from pathlib import Path
 from typing import Callable
 
+from androidtvremote2 import CannotConnect, ConnectionClosed
+from PyQt5.QtCore import pyqtSignal
 from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import (
     QAction,
@@ -26,29 +28,26 @@ from remote_control import RemoteControl
 _LOGGER = logging.getLogger(__name__)
 
 
-def connection_check(func):
-    @functools.wraps(func)
-    def wrapper(self):
-        try:
-            if self.is_connected:
-                return func(self)
-            self._on_search()
-        except Exception as exc:
-            _LOGGER.error('Error: %s', exc)
-            self.search_label.setText('Error')
-            return None
-
-    return wrapper
-
-
 class MainWindow(QWidget):
+    availability_changed = pyqtSignal(bool)
+    invalid_auth = pyqtSignal()
+
     def __init__(self):
         super().__init__()
 
         Path('keys').mkdir(parents=True, exist_ok=True)
 
         self.is_connected = False
+        self._device_name: str | None = None
+        self._pair_task: asyncio.Task | None = None
+        self._remote_buttons: list[QPushButton] = []
         self.remote_control = RemoteControl()
+        self.remote_control.set_callbacks(
+            on_availability=self.availability_changed.emit,
+            on_invalid_auth=self.invalid_auth.emit,
+        )
+        self.availability_changed.connect(self._on_availability)
+        self.invalid_auth.connect(self._on_invalid_auth)
 
         self._main_window_configure()
         self._create_tray()
@@ -59,10 +58,10 @@ class MainWindow(QWidget):
         self.search_label = QLabel('Not connected')
         top_layout.addWidget(self.search_label)
 
-        search_button = QPushButton('⟲')
-        search_button.setFixedSize(32, 32)
-        search_button.clicked.connect(self._on_search)
-        top_layout.addWidget(search_button)
+        self.search_button = QPushButton('⟲')
+        self.search_button.setFixedSize(32, 32)
+        self.search_button.clicked.connect(self._on_search)
+        top_layout.addWidget(self.search_button)
 
         main_layout = QVBoxLayout()
         main_layout.setContentsMargins(20, 20, 20, 20)
@@ -72,31 +71,33 @@ class MainWindow(QWidget):
         grid_layout.setSpacing(15)
         grid_layout.setVerticalSpacing(15)
 
-        self.add_button(grid_layout, 'Power', 0, 0, self._on_power)
-        self.add_button(grid_layout, 'Back', 0, 1, self._on_back)
-        self.add_button(grid_layout, 'Menu', 0, 2, self._on_menu)
+        self.add_button(grid_layout, 'Power', 0, 0, partial(self._send_key, RemoteControl.POWER))
+        self.add_button(grid_layout, 'Back', 0, 1, partial(self._send_key, RemoteControl.BACK))
+        self.add_button(grid_layout, 'Menu', 0, 2, partial(self._send_key, RemoteControl.MENU))
 
-        self.add_button(grid_layout, 'CH▲', 1, 0, self._on_channel_up)
-        self.add_button(grid_layout, 'Home', 1, 1, self._on_home)
-        self.add_button(grid_layout, 'VOL+', 1, 2, self._on_volume_up)
+        self.add_button(grid_layout, 'CH▲', 1, 0, partial(self._send_key, RemoteControl.CHANNEL_UP))
+        self.add_button(grid_layout, 'Home', 1, 1, partial(self._send_key, RemoteControl.HOME))
+        self.add_button(grid_layout, 'VOL+', 1, 2, partial(self._send_key, RemoteControl.VOLUME_UP))
 
-        self.add_button(grid_layout, 'CH▼', 2, 0, self._on_channel_down)
-        self.add_button(grid_layout, 'Mute', 2, 1, self._on_mute)
-        self.add_button(grid_layout, 'VOL-', 2, 2, self._on_volume_down)
+        self.add_button(grid_layout, 'CH▼', 2, 0, partial(self._send_key, RemoteControl.CHANNEL_DOWN))
+        self.add_button(grid_layout, 'Mute', 2, 1, partial(self._send_key, RemoteControl.VOLUME_MUTE))
+        self.add_button(grid_layout, 'VOL-', 2, 2, partial(self._send_key, RemoteControl.VOLUME_DOWN))
 
         navigation_layout = QGridLayout()
         navigation_layout.setHorizontalSpacing(10)
 
-        self.add_button(navigation_layout, '▲', 0, 1, self._on_dpad_up)
-        self.add_button(navigation_layout, '◀', 1, 0, self._on_dpad_left)
-        self.add_button(navigation_layout, 'OK', 1, 1, self._on_dpad_center)
-        self.add_button(navigation_layout, '▶', 1, 2, self._on_dpad_right)
-        self.add_button(navigation_layout, '▼', 2, 1, self._on_dpad_down)
+        self.add_button(navigation_layout, '▲', 0, 1, partial(self._send_key, RemoteControl.DPAD_UP))
+        self.add_button(navigation_layout, '◀', 1, 0, partial(self._send_key, RemoteControl.DPAD_LEFT))
+        self.add_button(navigation_layout, 'OK', 1, 1, partial(self._send_key, RemoteControl.DPAD_CENTER))
+        self.add_button(navigation_layout, '▶', 1, 2, partial(self._send_key, RemoteControl.DPAD_RIGHT))
+        self.add_button(navigation_layout, '▼', 2, 1, partial(self._send_key, RemoteControl.DPAD_DOWN))
 
         main_layout.addLayout(top_layout)
         main_layout.addLayout(grid_layout)
         main_layout.addLayout(navigation_layout)
         self.setLayout(main_layout)
+
+        self._set_remote_buttons_enabled(False)
 
     def add_button(
         self,
@@ -113,6 +114,8 @@ class MainWindow(QWidget):
 
         if handler:
             button.clicked.connect(handler)
+
+        self._remote_buttons.append(button)
 
     def closeEvent(self, event):  # noqa: N802
         event.ignore()
@@ -195,91 +198,70 @@ class MainWindow(QWidget):
 
         self.tray_icon.activated.connect(self._on_tray_icon_activated)
 
-    @connection_check
-    def _on_power(self) -> None:
-        self.remote_control.power()
+    def _set_connection_state(self, connected: bool, label: str) -> None:
+        self.is_connected = connected
+        self.search_label.setText(label)
+        self._set_remote_buttons_enabled(connected)
 
-    @connection_check
-    def _on_back(self) -> None:
-        self.remote_control.back()
+    def _set_remote_buttons_enabled(self, enabled: bool) -> None:
+        for button in self._remote_buttons:
+            button.setEnabled(enabled)
 
-    @connection_check
-    def _on_menu(self) -> None:
-        self.remote_control.menu()
+    def _on_availability(self, is_available: bool) -> None:
+        if is_available and self._device_name:
+            self._set_connection_state(True, self._device_name)
+        elif is_available:
+            self._set_connection_state(False, 'Not connected')
+        else:
+            self._set_connection_state(False, 'Reconnecting...')
 
-    @connection_check
-    def _on_home(self) -> None:
-        self.remote_control.home()
+    def _on_invalid_auth(self) -> None:
+        self._set_connection_state(False, 'Re-pairing...')
+        self._on_search()
 
-    @connection_check
-    def _on_channel_up(self) -> None:
-        self.remote_control.channel_up()
-
-    @connection_check
-    def _on_channel_down(self) -> None:
-        self.remote_control.channel_down()
-
-    @connection_check
-    def _on_volume_up(self) -> None:
-        self.remote_control.volume_up()
-
-    @connection_check
-    def _on_volume_down(self) -> None:
-        self.remote_control.volume_down()
-
-    @connection_check
-    def _on_mute(self) -> None:
-        self.remote_control.volume_mute()
-
-    @connection_check
-    def _on_dpad_up(self) -> None:
-        self.remote_control.dpad_up()
-
-    @connection_check
-    def _on_dpad_down(self) -> None:
-        self.remote_control.dpad_down()
-
-    @connection_check
-    def _on_dpad_left(self) -> None:
-        self.remote_control.dpad_left()
-
-    @connection_check
-    def _on_dpad_right(self) -> None:
-        self.remote_control.dpad_right()
-
-    @connection_check
-    def _on_dpad_center(self) -> None:
-        self.remote_control.dpad_center()
+    def _send_key(self, key_code: str) -> None:
+        try:
+            self.remote_control.send_key(key_code)
+        except Exception as exc:
+            _LOGGER.error('Send key error: %s', exc)
+            self._set_connection_state(False, 'Error')
 
     def _on_search(self) -> None:
-        asyncio.create_task(self._pair())
+        if self._pair_task and not self._pair_task.done():
+            return
+        self._pair_task = asyncio.create_task(self._pair())
 
     async def _pair(self) -> None:
-        self.search_label.setText('Search...')
-        if self.is_connected:
-            self.is_connected = False
-            self.remote_control.disconnect()
-
-        addrs: list = await self.remote_control.find_android_tv()
-        if len(addrs) > 0:
-            self.search_label.setText(f'Pair to {addrs[0]}')
-
-            try:
-                await self.remote_control.pair(
-                    addrs[0],
-                    lambda: QInputDialog.getText(self, 'TV Remote Control', 'Enter the code:'),
-                )
-                device_info = self.remote_control.device_info()
-            except Exception as exc:
-                self.search_label.setText('Not connected')
-                _LOGGER.error('Pair Error: %s', exc)
+        self.search_button.setEnabled(False)
+        try:
+            self._set_connection_state(False, 'Search...')
+            addrs = await self.remote_control.find_android_tv()
+            if not addrs:
+                self.search_label.setText('Android TV not found')
                 return
 
+            self.search_label.setText(f'Pair to {addrs[0]}')
+            await self.remote_control.pair(
+                addrs[0],
+                lambda: QInputDialog.getText(self, 'TV Remote Control', 'Enter the code:'),
+            )
+            device_info = self.remote_control.device_info()
             if device_info:
-                self.search_label.setText(f"{device_info['manufacturer']} {device_info['model']}")
-                self.is_connected = True
-        else:
-            self.search_label.setText('Android TV not found')
+                self._device_name = f'{device_info["manufacturer"]} {device_info["model"]}'
+                self._set_connection_state(True, self._device_name)
+            else:
+                self.search_label.setText('Not connected')
+        except RuntimeError as exc:
+            _LOGGER.info('Pairing interrupted: %s', exc)
+            self.search_label.setText('Not connected')
+        except (CannotConnect, ConnectionClosed) as exc:
+            _LOGGER.error('Connect error: %s', exc)
+            self.search_label.setText('Not connected')
+        except Exception as exc:
+            _LOGGER.error('Pair error: %s', exc)
+            self.search_label.setText('Error')
+        finally:
+            self.search_button.setEnabled(True)
 
 
 if __name__ == '__main__':

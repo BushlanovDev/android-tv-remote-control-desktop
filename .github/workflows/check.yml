@@ -15,12 +15,13 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Display Python version
         run: python -c "import sys; print(sys.version)"
+      - name: Compile smoke check
+        run: python -m compileall -q .
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
       - name: Lint with Ruff
         run: |
-          pip install ruff
+          pip install ruff==0.13.0
           ruff check --output-format=github .
-        continue-on-error: true
