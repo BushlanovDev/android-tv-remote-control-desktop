@@ -31,6 +31,16 @@ class RemoteControl:
     DPAD_CENTER: str = 'DPAD_CENTER'
     CHANNEL_UP: str = 'CHANNEL_UP'
     CHANNEL_DOWN: str = 'CHANNEL_DOWN'
+    DIGIT_0: str = '0'
+    DIGIT_1: str = '1'
+    DIGIT_2: str = '2'
+    DIGIT_3: str = '3'
+    DIGIT_4: str = '4'
+    DIGIT_5: str = '5'
+    DIGIT_6: str = '6'
+    DIGIT_7: str = '7'
+    DIGIT_8: str = '8'
+    DIGIT_9: str = '9'
 
     def __init__(self):
         self.remote: AndroidTVRemote | None = None
@@ -48,6 +58,7 @@ class RemoteControl:
         self._on_invalid_auth = on_invalid_auth
 
     async def find_android_tv(self) -> list[str]:
+        _LOGGER.info('Searching for Android TV...')
         found: list[str] = []
         tasks: list[asyncio.Task] = []
 
@@ -65,12 +76,14 @@ class RemoteControl:
         services = ['_androidtvremote2._tcp.local.']
         browser = AsyncServiceBrowser(zc.zeroconf, services, handlers=[on_service_state_change])
 
-        await asyncio.sleep(5)
+        await asyncio.sleep(10)
 
         await browser.async_cancel()
-        await zc.async_close()
         await asyncio.gather(*tasks, return_exceptions=True)
+        await zc.async_close()
 
+        if not found:
+            _LOGGER.warning('Android TV not found')
         return found
 
     async def pair(self, host: str, callback: Callable) -> None:
@@ -112,7 +125,6 @@ class RemoteControl:
         self.remote.keep_reconnecting(invalid_auth_callback=lambda: self._invalid_auth(generation))
 
         _LOGGER.info('device_info: %s', self.remote.device_info)
-        _LOGGER.info('is_on: %s', self.remote.is_on)
         _LOGGER.info('current_app: %s', self.remote.current_app)
         _LOGGER.info('volume_info: %s', self.remote.volume_info)
 
@@ -163,6 +175,7 @@ class RemoteControl:
         for address in info.parsed_scoped_addresses(IPVersion.V4Only):
             if address not in found:
                 found.append(address)
+                _LOGGER.info('Found Android TV at %s', address)
 
     def _is_on_updated(self, is_on: bool) -> None:
         _LOGGER.info('Notified that is_on: %s', is_on)
